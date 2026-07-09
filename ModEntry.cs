@@ -25,6 +25,7 @@ public sealed class ModEntry : Mod
 
         helper.Events.GameLoop.SaveLoaded += this.OnSaveLoaded;
         helper.Events.GameLoop.DayStarted += this.OnDayStarted;
+        helper.Events.GameLoop.UpdateTicked += this.OnUpdateTicked;
         helper.Events.GameLoop.Saving += this.OnSaving;
         helper.Events.Multiplayer.PeerConnected += this.OnPeerConnected;
         helper.Events.World.BuildingListChanged += this.OnBuildingListChanged;
@@ -43,11 +44,22 @@ public sealed class ModEntry : Mod
         this.EnsureFarmHasEnoughHorses("day started");
     }
 
+    private void OnUpdateTicked(object? sender, UpdateTickedEventArgs e)
+    {
+        if (!e.IsMultipleOf(60) || !this.CanManageHorses())
+            return;
+
+        this.ReRegisterMissingManagedHorses("runtime check");
+        this.ClearHorseOwners();
+        this.CaptureManagedHorses();
+    }
+
     private void OnSaving(object? sender, SavingEventArgs e)
     {
         if (!this.CanManageHorses())
             return;
 
+        this.ReRegisterMissingManagedHorses("saving");
         this.ClearHorseOwners();
         this.CaptureManagedHorses();
         this.WriteSaveData();
@@ -67,13 +79,7 @@ public sealed class ModEntry : Mod
     private void LoadSaveData()
     {
         this.SaveData = this.Helper.Data.ReadSaveData<ModSaveData>(SaveDataKey) ?? new ModSaveData();
-        this.ManagedHorseIds.Clear();
-
-        foreach (SavedHorseData savedHorse in this.SaveData.Horses)
-        {
-            if (Guid.TryParse(savedHorse.HorseId, out Guid horseId))
-                this.ManagedHorseIds.Add(horseId);
-        }
+        this.NormalizeSaveData();
     }
 
     private void LoadSavedHorses()
@@ -81,20 +87,32 @@ public sealed class ModEntry : Mod
         if (!this.CanManageHorses())
             return;
 
-        foreach (SavedHorseData savedHorse in this.SaveData.Horses.ToList())
+        this.ReRegisterMissingManagedHorses("save data load");
+        this.ClearHorseOwners();
+    }
+
+    private void ReRegisterMissingManagedHorses(string reason)
+    {
+        List<Horse> existingHorses = this.GetExistingHorses();
+        int restored = 0;
+
+        foreach (SavedHorseData savedHorse in this.SaveData.Horses)
         {
             if (!Guid.TryParse(savedHorse.HorseId, out Guid horseId))
                 continue;
 
-            if (this.GetExistingHorses().Any(horse => horse.HorseId == horseId))
+            if (existingHorses.Any(horse => horse.HorseId == horseId))
                 continue;
 
             GameLocation location = Game1.getLocationFromName(savedHorse.LocationName) ?? Game1.getFarm();
             Vector2 tile = new(savedHorse.TileX, savedHorse.TileY);
-            this.AddManagedHorse(location, horseId, tile);
+            Horse horse = this.AddManagedHorse(location, horseId, tile);
+            existingHorses.Add(horse);
+            restored++;
         }
 
-        this.ClearHorseOwners();
+        if (restored > 0)
+            this.Monitor.Log($"Re-registered {restored} managed horse(s), triggered by {reason}.", LogLevel.Trace);
     }
 
     private void EnsureFarmHasEnoughHorses(string reason)
@@ -114,14 +132,17 @@ public sealed class ModEntry : Mod
         if (stables.Count == 0)
             return;
 
+        this.ReRegisterMissingManagedHorses(reason);
         this.ClearHorseOwners();
 
         int wanted = this.GetWantedHorseCount();
         if (wanted <= 1 && !this.Config.AllowExtraHorsesInSinglePlayer)
             return;
 
-        int existingCount = this.GetExistingHorses().Count;
-        int missingCount = Math.Max(0, wanted - existingCount);
+        List<Horse> existingHorses = this.GetExistingHorses();
+        int unmanagedHorseCount = existingHorses.Count(horse => !this.ManagedHorseIds.Contains(horse.HorseId));
+        int managedHorseCount = this.ManagedHorseIds.Count;
+        int missingCount = Math.Max(0, wanted - unmanagedHorseCount - managedHorseCount);
         if (missingCount == 0)
             return;
 
@@ -130,7 +151,7 @@ public sealed class ModEntry : Mod
 
         for (int index = 0; index < missingCount; index++)
         {
-            Vector2 tile = this.FindSpawnTile(farm, origin, existingCount + index);
+            Vector2 tile = this.FindSpawnTile(farm, origin, existingHorses.Count + index);
             Horse horse = this.AddManagedHorse(farm, Guid.NewGuid(), tile);
             this.SaveData.Horses.Add(this.CreateSavedHorseData(horse));
         }
@@ -173,6 +194,25 @@ public sealed class ModEntry : Mod
     {
         foreach (Horse horse in this.GetExistingHorses())
             horse.ownerId.Value = 0;
+    }
+
+    private void NormalizeSaveData()
+    {
+        this.ManagedHorseIds.Clear();
+        List<SavedHorseData> normalized = new();
+
+        foreach (SavedHorseData savedHorse in this.SaveData.Horses)
+        {
+            if (!Guid.TryParse(savedHorse.HorseId, out Guid horseId))
+                continue;
+
+            if (!this.ManagedHorseIds.Add(horseId))
+                continue;
+
+            normalized.Add(savedHorse);
+        }
+
+        this.SaveData.Horses = normalized;
     }
 
     private List<Horse> GetExistingHorses()
