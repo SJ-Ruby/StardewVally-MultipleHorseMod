@@ -13,8 +13,11 @@ namespace MultipleHorseMod;
 
 public sealed class ModEntry : Mod
 {
+    private const string SaveDataKey = "multiple-horse-data";
+
     private ModConfig Config = null!;
-    private readonly Dictionary<long, MountedHorseSnapshot> LastMountedHorses = new();
+    private ModSaveData SaveData = new();
+    private readonly HashSet<Guid> ManagedHorseIds = new();
 
     public override void Entry(IModHelper helper)
     {
@@ -22,29 +25,32 @@ public sealed class ModEntry : Mod
 
         helper.Events.GameLoop.SaveLoaded += this.OnSaveLoaded;
         helper.Events.GameLoop.DayStarted += this.OnDayStarted;
-        helper.Events.GameLoop.UpdateTicked += this.OnUpdateTicked;
+        helper.Events.GameLoop.Saving += this.OnSaving;
         helper.Events.Multiplayer.PeerConnected += this.OnPeerConnected;
         helper.Events.World.BuildingListChanged += this.OnBuildingListChanged;
     }
 
     private void OnSaveLoaded(object? sender, SaveLoadedEventArgs e)
     {
+        this.LoadSaveData();
+        this.LoadSavedHorses();
         this.EnsureFarmHasEnoughHorses("save loaded");
     }
 
     private void OnDayStarted(object? sender, DayStartedEventArgs e)
     {
-        this.LastMountedHorses.Clear();
+        this.LoadSavedHorses();
         this.EnsureFarmHasEnoughHorses("day started");
     }
 
-    private void OnUpdateTicked(object? sender, UpdateTickedEventArgs e)
+    private void OnSaving(object? sender, SavingEventArgs e)
     {
-        if (!e.IsMultipleOf(60))
+        if (!this.CanManageHorses())
             return;
 
-        this.RememberMountedHorses();
-        this.RestoreMissingRecentlyMountedHorses();
+        this.ClearHorseOwners();
+        this.CaptureManagedHorses();
+        this.WriteSaveData();
     }
 
     private void OnPeerConnected(object? sender, PeerConnectedEventArgs e)
@@ -58,12 +64,42 @@ public sealed class ModEntry : Mod
             this.EnsureFarmHasEnoughHorses("building list changed");
     }
 
-    private void EnsureFarmHasEnoughHorses(string reason)
+    private void LoadSaveData()
     {
-        if (!Context.IsWorldReady)
+        this.SaveData = this.Helper.Data.ReadSaveData<ModSaveData>(SaveDataKey) ?? new ModSaveData();
+        this.ManagedHorseIds.Clear();
+
+        foreach (SavedHorseData savedHorse in this.SaveData.Horses)
+        {
+            if (Guid.TryParse(savedHorse.HorseId, out Guid horseId))
+                this.ManagedHorseIds.Add(horseId);
+        }
+    }
+
+    private void LoadSavedHorses()
+    {
+        if (!this.CanManageHorses())
             return;
 
-        if (this.Config.HostOnly && !Context.IsMainPlayer)
+        foreach (SavedHorseData savedHorse in this.SaveData.Horses.ToList())
+        {
+            if (!Guid.TryParse(savedHorse.HorseId, out Guid horseId))
+                continue;
+
+            if (this.GetExistingHorses().Any(horse => horse.HorseId == horseId))
+                continue;
+
+            GameLocation location = Game1.getLocationFromName(savedHorse.LocationName) ?? Game1.getFarm();
+            Vector2 tile = new(savedHorse.TileX, savedHorse.TileY);
+            this.AddManagedHorse(location, horseId, tile);
+        }
+
+        this.ClearHorseOwners();
+    }
+
+    private void EnsureFarmHasEnoughHorses(string reason)
+    {
+        if (!this.CanManageHorses())
             return;
 
         Farm? farm = Game1.getFarm();
@@ -78,95 +114,79 @@ public sealed class ModEntry : Mod
         if (stables.Count == 0)
             return;
 
-        List<Farmer> farmers = this.GetOnlineFarmers();
-        int wanted = farmers.Count;
+        this.ClearHorseOwners();
+
+        int wanted = this.GetWantedHorseCount();
         if (wanted <= 1 && !this.Config.AllowExtraHorsesInSinglePlayer)
             return;
 
-        List<Horse> existingHorses = this.GetExistingHorses();
-        Queue<Farmer> farmersNeedingHorse = new(
-            farmers.Where(farmer => !existingHorses.Any(horse => horse.ownerId.Value == farmer.UniqueMultiplayerID))
-        );
-
-        foreach (Horse horse in existingHorses.Where(horse => horse.ownerId.Value == 0))
-        {
-            if (!farmersNeedingHorse.TryDequeue(out Farmer? owner) || owner is null)
-                break;
-
-            horse.ownerId.Value = owner.UniqueMultiplayerID;
-        }
-
-        if (farmersNeedingHorse.Count == 0)
+        int existingCount = this.GetExistingHorses().Count;
+        int missingCount = Math.Max(0, wanted - existingCount);
+        if (missingCount == 0)
             return;
 
         Stable stable = stables[0];
         Point origin = stable.GetDefaultHorseTile();
 
-        int created = 0;
-        while (farmersNeedingHorse.TryDequeue(out Farmer? owner) && owner is not null)
+        for (int index = 0; index < missingCount; index++)
         {
-            Vector2 tile = this.FindSpawnTile(farm, origin, created);
-            this.AddHorse(farm, Guid.NewGuid(), owner.UniqueMultiplayerID, tile);
-            created++;
+            Vector2 tile = this.FindSpawnTile(farm, origin, existingCount + index);
+            Horse horse = this.AddManagedHorse(farm, Guid.NewGuid(), tile);
+            this.SaveData.Horses.Add(this.CreateSavedHorseData(horse));
         }
 
-        this.Monitor.Log($"Created {created} extra horse(s) for {wanted} farmer(s), triggered by {reason}.", LogLevel.Info);
+        this.WriteSaveData();
+        this.Monitor.Log($"Created {missingCount} shared horse(s) for {wanted} farmer(s), triggered by {reason}.", LogLevel.Info);
     }
 
-    private void RememberMountedHorses()
+    private bool CanManageHorses()
     {
         if (!Context.IsWorldReady)
-            return;
+            return false;
 
-        foreach (Farmer farmer in this.GetOnlineFarmers())
-        {
-            if (farmer.mount is not Horse horse)
-                continue;
-
-            GameLocation? location = farmer.currentLocation ?? horse.currentLocation;
-            if (location is null)
-                continue;
-
-            this.LastMountedHorses[farmer.UniqueMultiplayerID] = new MountedHorseSnapshot(
-                horse.HorseId,
-                farmer.UniqueMultiplayerID,
-                location,
-                farmer.Tile
-            );
-        }
+        return !this.Config.HostOnly || Context.IsMainPlayer;
     }
 
-    private void RestoreMissingRecentlyMountedHorses()
+    private int GetWantedHorseCount()
     {
-        if (!Context.IsWorldReady)
-            return;
+        List<Farmer> farmers = Game1.getAllFarmers()?.ToList() ?? new List<Farmer>();
 
-        if (this.Config.HostOnly && !Context.IsMainPlayer)
-            return;
+        if (!farmers.Any(farmer => farmer.UniqueMultiplayerID == Game1.player.UniqueMultiplayerID))
+            farmers.Insert(0, Game1.player);
 
-        List<Horse> existingHorses = this.GetExistingHorses();
-        foreach (MountedHorseSnapshot snapshot in this.LastMountedHorses.Values.ToList())
-        {
-            if (existingHorses.Any(horse =>
-                horse.HorseId == snapshot.HorseId
-                || horse.ownerId.Value == snapshot.OwnerId))
-            {
-                continue;
-            }
-
-            Vector2 tile = this.FindSpawnTile(snapshot.Location, snapshot.Tile);
-            this.AddHorse(snapshot.Location, snapshot.HorseId, snapshot.OwnerId, tile);
-            this.Monitor.Log($"Restored horse for farmer {snapshot.OwnerId} after it disappeared on dismount.", LogLevel.Info);
-        }
+        return farmers
+            .GroupBy(farmer => farmer.UniqueMultiplayerID)
+            .Count();
     }
 
-    private Horse AddHorse(GameLocation location, Guid horseId, long ownerId, Vector2 tile)
+    private Horse AddManagedHorse(GameLocation location, Guid horseId, Vector2 tile)
     {
-        Horse horse = new Horse(horseId, (int)tile.X, (int)tile.Y);
-        horse.ownerId.Value = ownerId;
+        Horse horse = new(horseId, (int)tile.X, (int)tile.Y);
+        horse.ownerId.Value = 0;
         horse.currentLocation = location;
         location.characters.Add(horse);
+        this.ManagedHorseIds.Add(horseId);
         return horse;
+    }
+
+    private void ClearHorseOwners()
+    {
+        foreach (Horse horse in this.GetExistingHorses())
+            horse.ownerId.Value = 0;
+    }
+
+    private List<Horse> GetExistingHorses()
+    {
+        IEnumerable<Horse> locationHorses = Game1.locations.SelectMany(location => location.characters.OfType<Horse>());
+        IEnumerable<Horse> mountedHorses = this.GetOnlineFarmers()
+            .Select(farmer => farmer.mount)
+            .OfType<Horse>();
+
+        return locationHorses
+            .Concat(mountedHorses)
+            .GroupBy(horse => horse.HorseId)
+            .Select(group => group.First())
+            .ToList();
     }
 
     private List<Farmer> GetOnlineFarmers()
@@ -182,18 +202,31 @@ public sealed class ModEntry : Mod
             .ToList();
     }
 
-    private List<Horse> GetExistingHorses()
+    private void CaptureManagedHorses()
     {
-        IEnumerable<Horse> locationHorses = Game1.locations.SelectMany(location => location.characters.OfType<Horse>());
-        IEnumerable<Horse> mountedHorses = this.GetOnlineFarmers()
-            .Select(farmer => farmer.mount)
-            .OfType<Horse>();
-
-        return locationHorses
-            .Concat(mountedHorses)
-            .GroupBy(horse => horse.HorseId)
-            .Select(group => group.First())
+        this.SaveData.Horses = this.GetExistingHorses()
+            .Where(horse => this.ManagedHorseIds.Contains(horse.HorseId))
+            .Select(this.CreateSavedHorseData)
             .ToList();
+    }
+
+    private SavedHorseData CreateSavedHorseData(Horse horse)
+    {
+        GameLocation location = horse.currentLocation ?? Game1.getFarm();
+        Vector2 tile = horse.Tile;
+
+        return new SavedHorseData
+        {
+            HorseId = horse.HorseId.ToString(),
+            LocationName = location.NameOrUniqueName,
+            TileX = (int)tile.X,
+            TileY = (int)tile.Y
+        };
+    }
+
+    private void WriteSaveData()
+    {
+        this.Helper.Data.WriteSaveData(SaveDataKey, this.SaveData);
     }
 
     private Vector2 FindSpawnTile(Farm farm, Point origin, int offset)
@@ -216,27 +249,4 @@ public sealed class ModEntry : Mod
 
         return new Vector2(origin.X + offset, origin.Y + 1);
     }
-
-    private Vector2 FindSpawnTile(GameLocation location, Vector2 origin)
-    {
-        for (int radius = 0; radius <= 4; radius++)
-        {
-            for (int x = -radius; x <= radius; x++)
-            {
-                for (int y = -radius; y <= radius; y++)
-                {
-                    if (Math.Abs(x) != radius && Math.Abs(y) != radius)
-                        continue;
-
-                    Vector2 tile = new(origin.X + x, origin.Y + y);
-                    if (location.isTileLocationOpen(tile))
-                        return tile;
-                }
-            }
-        }
-
-        return origin;
-    }
-
-    private sealed record MountedHorseSnapshot(Guid HorseId, long OwnerId, GameLocation Location, Vector2 Tile);
 }
