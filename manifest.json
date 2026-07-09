@@ -1,0 +1,10 @@
+{
+  "Name": "Multiple Horse Mod",
+  "Author": "Mayn",
+  "Version": "1.0.0",
+  "Description": "Adds enough stable horses for all multiplayer farmers.",
+  "UniqueID": "Mayn.MultipleHorseMod",
+  "EntryDll": "MultipleHorseMod.dll",
+  "MinimumApiVersion": "4.0.0",
+  "UpdateKeys": []
+}
