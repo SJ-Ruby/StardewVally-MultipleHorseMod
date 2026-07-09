@@ -1,0 +1,2 @@
+# StardewVally-MultipleHorseMod
+实现多人游戏不需要建造多个马厩即可以有多匹马
