@@ -101,12 +101,17 @@ public sealed class ModEntry : Mod
             if (!Guid.TryParse(savedHorse.HorseId, out Guid horseId))
                 continue;
 
-            if (existingHorses.Any(horse => horse.HorseId == horseId))
+            Horse? existingHorse = existingHorses.FirstOrDefault(horse => horse.HorseId == horseId);
+            if (existingHorse is not null)
+            {
+                this.ApplySavedHorseData(existingHorse, savedHorse);
                 continue;
+            }
 
             GameLocation location = Game1.getLocationFromName(savedHorse.LocationName) ?? Game1.getFarm();
             Vector2 tile = new(savedHorse.TileX, savedHorse.TileY);
             Horse horse = this.AddManagedHorse(location, horseId, tile);
+            this.ApplySavedHorseData(horse, savedHorse);
             existingHorses.Add(horse);
             restored++;
         }
@@ -153,7 +158,10 @@ public sealed class ModEntry : Mod
         {
             Vector2 tile = this.FindSpawnTile(farm, origin, existingHorses.Count + index);
             Horse horse = this.AddManagedHorse(farm, Guid.NewGuid(), tile);
-            this.SaveData.Horses.Add(this.CreateSavedHorseData(horse));
+            SavedHorseData savedHorse = this.CreateSavedHorseData(horse);
+            savedHorse.Name = this.CreateDefaultHorseName(managedHorseCount + index + 1);
+            this.ApplySavedHorseData(horse, savedHorse);
+            this.SaveData.Horses.Add(savedHorse);
         }
 
         this.WriteSaveData();
@@ -190,6 +198,15 @@ public sealed class ModEntry : Mod
         return horse;
     }
 
+    private void ApplySavedHorseData(Horse horse, SavedHorseData savedHorse)
+    {
+        if (!string.IsNullOrWhiteSpace(savedHorse.Name))
+            horse.Name = savedHorse.Name;
+
+        if (int.TryParse(savedHorse.Skin, out int skinId) && skinId > 0)
+            horse.Manners = skinId;
+    }
+
     private void ClearHorseOwners()
     {
         foreach (Horse horse in this.GetExistingHorses())
@@ -209,6 +226,10 @@ public sealed class ModEntry : Mod
             if (!this.ManagedHorseIds.Add(horseId))
                 continue;
 
+            if (string.IsNullOrWhiteSpace(savedHorse.Name))
+                savedHorse.Name = this.CreateDefaultHorseName(normalized.Count + 1);
+
+            savedHorse.Skin ??= "";
             normalized.Add(savedHorse);
         }
 
@@ -254,14 +275,47 @@ public sealed class ModEntry : Mod
     {
         GameLocation location = horse.currentLocation ?? Game1.getFarm();
         Vector2 tile = horse.Tile;
+        SavedHorseData? existingData = this.GetSavedHorseData(horse.HorseId);
 
         return new SavedHorseData
         {
             HorseId = horse.HorseId.ToString(),
+            Name = this.GetHorseName(horse, existingData),
+            Skin = this.GetHorseSkin(horse, existingData),
             LocationName = location.NameOrUniqueName,
             TileX = (int)tile.X,
             TileY = (int)tile.Y
         };
+    }
+
+    private SavedHorseData? GetSavedHorseData(Guid horseId)
+    {
+        string horseIdText = horseId.ToString();
+        return this.SaveData.Horses.FirstOrDefault(horse => horse.HorseId == horseIdText);
+    }
+
+    private string GetHorseName(Horse horse, SavedHorseData? existingData)
+    {
+        if (!string.IsNullOrWhiteSpace(horse.Name))
+            return horse.Name;
+
+        if (!string.IsNullOrWhiteSpace(existingData?.Name))
+            return existingData.Name;
+
+        return this.CreateDefaultHorseName(this.ManagedHorseIds.Count);
+    }
+
+    private string GetHorseSkin(Horse horse, SavedHorseData? existingData)
+    {
+        if (horse.Manners > 0)
+            return horse.Manners.ToString();
+
+        return existingData?.Skin ?? "";
+    }
+
+    private string CreateDefaultHorseName(int index)
+    {
+        return $"Shared Horse {Math.Max(1, index)}";
     }
 
     private void WriteSaveData()
