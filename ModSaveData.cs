@@ -15,6 +15,10 @@ internal sealed class SavedHorseData
 
     public string Skin { get; set; } = "";
 
+    public string CabinId { get; set; } = "";
+
+    public long OwnerId { get; set; }
+
     public string LocationName { get; set; } = "Farm";
 
     public int TileX { get; set; }

@@ -1,8 +1,8 @@
 {
   "Name": "Multiple Horse Mod",
   "Author": "Mayn",
-  "Version": "1.0.0",
-  "Description": "Adds enough stable horses for all multiplayer farmers.",
+  "Version": "2.0.0",
+  "Description": "Adds one persistent cabin-bound horse for each multiplayer farmhand when the farm has a stable.",
   "UniqueID": "Mayn.MultipleHorseMod",
   "EntryDll": "MultipleHorseMod.dll",
   "MinimumApiVersion": "4.0.0",

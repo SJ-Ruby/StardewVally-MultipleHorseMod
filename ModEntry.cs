@@ -18,6 +18,8 @@ public sealed class ModEntry : Mod
     private ModConfig Config = null!;
     private ModSaveData SaveData = new();
     private readonly HashSet<Guid> ManagedHorseIds = new();
+    private readonly Dictionary<Guid, Horse> ManagedHorseInstances = new();
+    private readonly Dictionary<long, Horse> LastMountedHorseByFarmer = new();
 
     public override void Entry(IModHelper helper)
     {
@@ -33,6 +35,8 @@ public sealed class ModEntry : Mod
 
     private void OnSaveLoaded(object? sender, SaveLoadedEventArgs e)
     {
+        this.ManagedHorseInstances.Clear();
+        this.LastMountedHorseByFarmer.Clear();
         this.LoadSaveData();
         this.LoadSavedHorses();
         this.EnsureFarmHasEnoughHorses("save loaded");
@@ -42,15 +46,21 @@ public sealed class ModEntry : Mod
     {
         this.LoadSavedHorses();
         this.EnsureFarmHasEnoughHorses("day started");
+        this.ReturnCabinHorsesHome();
     }
 
     private void OnUpdateTicked(object? sender, UpdateTickedEventArgs e)
     {
-        if (!e.IsMultipleOf(60) || !this.CanManageHorses())
+        if (!this.CanManageHorses())
             return;
 
-        this.ReRegisterMissingManagedHorses("runtime check");
-        this.ClearHorseOwners();
+        this.ReattachDismountedHorses();
+
+        if (!e.IsMultipleOf(60))
+            return;
+
+        this.CleanupDeletedCabinHorses();
+        this.ApplyCabinOwnership();
         this.CaptureManagedHorses();
     }
 
@@ -59,8 +69,7 @@ public sealed class ModEntry : Mod
         if (!this.CanManageHorses())
             return;
 
-        this.ReRegisterMissingManagedHorses("saving");
-        this.ClearHorseOwners();
+        this.ApplyCabinOwnership();
         this.CaptureManagedHorses();
         this.WriteSaveData();
     }
@@ -88,7 +97,7 @@ public sealed class ModEntry : Mod
             return;
 
         this.ReRegisterMissingManagedHorses("save data load");
-        this.ClearHorseOwners();
+        this.ApplyCabinOwnership();
     }
 
     private void ReRegisterMissingManagedHorses(string reason)
@@ -104,6 +113,7 @@ public sealed class ModEntry : Mod
             Horse? existingHorse = existingHorses.FirstOrDefault(horse => horse.HorseId == horseId);
             if (existingHorse is not null)
             {
+                this.ManagedHorseInstances[horseId] = existingHorse;
                 this.ApplySavedHorseData(existingHorse, savedHorse);
                 continue;
             }
@@ -137,35 +147,39 @@ public sealed class ModEntry : Mod
         if (stables.Count == 0)
             return;
 
-        this.ReRegisterMissingManagedHorses(reason);
-        this.ClearHorseOwners();
+        List<Building> cabins = this.GetCabinBuildings(farm);
+        this.AssignLegacyHorsesToCabins(cabins);
 
-        int wanted = this.GetWantedHorseCount();
-        if (wanted <= 1 && !this.Config.AllowExtraHorsesInSinglePlayer)
-            return;
+        HashSet<string> cabinIds = cabins.Select(cabin => cabin.id.Value.ToString()).ToHashSet();
+        this.RemoveHorsesForDeletedCabins(cabinIds);
 
         List<Horse> existingHorses = this.GetExistingHorses();
-        int unmanagedHorseCount = existingHorses.Count(horse => !this.ManagedHorseIds.Contains(horse.HorseId));
-        int managedHorseCount = this.ManagedHorseIds.Count;
-        int missingCount = Math.Max(0, wanted - unmanagedHorseCount - managedHorseCount);
-        if (missingCount == 0)
-            return;
+        int created = 0;
 
-        Stable stable = stables[0];
-        Point origin = stable.GetDefaultHorseTile();
-
-        for (int index = 0; index < missingCount; index++)
+        foreach (Building cabin in cabins)
         {
-            Vector2 tile = this.FindSpawnTile(farm, origin, existingHorses.Count + index);
-            Horse horse = this.AddManagedHorse(farm, Guid.NewGuid(), tile);
-            SavedHorseData savedHorse = this.CreateSavedHorseData(horse);
-            savedHorse.Name = this.CreateDefaultHorseName(managedHorseCount + index + 1);
+            string cabinId = cabin.id.Value.ToString();
+            SavedHorseData? savedHorse = this.SaveData.Horses.FirstOrDefault(data => data.CabinId == cabinId);
+            if (savedHorse is not null)
+                continue;
+
+            Vector2 homeTile = this.GetCabinHorseTile(farm, cabin, existingHorses.Count);
+            Horse horse = this.AddManagedHorse(farm, Guid.NewGuid(), homeTile);
+            savedHorse = this.CreateSavedHorseData(horse);
+            savedHorse.CabinId = cabinId;
+            savedHorse.Name = this.CreateDefaultHorseName(this.SaveData.Horses.Count + 1);
+            this.UpdateCabinBinding(savedHorse, cabin);
             this.ApplySavedHorseData(horse, savedHorse);
             this.SaveData.Horses.Add(savedHorse);
+            existingHorses.Add(horse);
+            created++;
         }
 
+        this.ApplyCabinOwnership();
         this.WriteSaveData();
-        this.Monitor.Log($"Created {missingCount} shared horse(s) for {wanted} farmer(s), triggered by {reason}.", LogLevel.Info);
+
+        if (created > 0)
+            this.Monitor.Log($"Created {created} cabin-bound horse(s), triggered by {reason}.", LogLevel.Info);
     }
 
     private bool CanManageHorses()
@@ -176,18 +190,6 @@ public sealed class ModEntry : Mod
         return !this.Config.HostOnly || Context.IsMainPlayer;
     }
 
-    private int GetWantedHorseCount()
-    {
-        List<Farmer> farmers = Game1.getAllFarmers()?.ToList() ?? new List<Farmer>();
-
-        if (!farmers.Any(farmer => farmer.UniqueMultiplayerID == Game1.player.UniqueMultiplayerID))
-            farmers.Insert(0, Game1.player);
-
-        return farmers
-            .GroupBy(farmer => farmer.UniqueMultiplayerID)
-            .Count();
-    }
-
     private Horse AddManagedHorse(GameLocation location, Guid horseId, Vector2 tile)
     {
         Horse horse = new(horseId, (int)tile.X, (int)tile.Y);
@@ -195,6 +197,7 @@ public sealed class ModEntry : Mod
         horse.currentLocation = location;
         location.characters.Add(horse);
         this.ManagedHorseIds.Add(horseId);
+        this.ManagedHorseInstances[horseId] = horse;
         return horse;
     }
 
@@ -205,12 +208,231 @@ public sealed class ModEntry : Mod
 
         if (int.TryParse(savedHorse.Skin, out int skinId) && skinId > 0)
             horse.Manners = skinId;
+
+        horse.ownerId.Value = savedHorse.OwnerId;
     }
 
-    private void ClearHorseOwners()
+    private List<Building> GetCabinBuildings(Farm farm)
     {
-        foreach (Horse horse in this.GetExistingHorses())
-            horse.ownerId.Value = 0;
+        return farm.buildings
+            .Where(building => building.isCabin && building.daysOfConstructionLeft.Value <= 0)
+            .OrderBy(building => building.id.Value)
+            .ToList();
+    }
+
+    private void AssignLegacyHorsesToCabins(List<Building> cabins)
+    {
+        HashSet<string> assignedCabinIds = this.SaveData.Horses
+            .Where(horse => !string.IsNullOrWhiteSpace(horse.CabinId))
+            .Select(horse => horse.CabinId)
+            .ToHashSet();
+
+        Queue<Building> availableCabins = new(cabins.Where(cabin => !assignedCabinIds.Contains(cabin.id.Value.ToString())));
+
+        foreach (SavedHorseData savedHorse in this.SaveData.Horses.Where(horse => string.IsNullOrWhiteSpace(horse.CabinId)))
+        {
+            if (!availableCabins.TryDequeue(out Building? cabin))
+                break;
+
+            savedHorse.CabinId = cabin.id.Value.ToString();
+            this.UpdateCabinBinding(savedHorse, cabin);
+        }
+    }
+
+    private void RemoveHorsesForDeletedCabins(HashSet<string> cabinIds)
+    {
+        HashSet<Guid> mountedHorseIds = this.GetOnlineFarmers()
+            .Select(farmer => farmer.mount)
+            .OfType<Horse>()
+            .Select(horse => horse.HorseId)
+            .ToHashSet();
+
+        List<SavedHorseData> removed = this.SaveData.Horses
+            .Where(horse => string.IsNullOrWhiteSpace(horse.CabinId) || !cabinIds.Contains(horse.CabinId))
+            .Where(horse => !Guid.TryParse(horse.HorseId, out Guid horseId) || !mountedHorseIds.Contains(horseId))
+            .ToList();
+
+        foreach (SavedHorseData savedHorse in removed)
+        {
+            if (!Guid.TryParse(savedHorse.HorseId, out Guid horseId))
+                continue;
+
+            foreach (GameLocation location in Game1.locations)
+            {
+                Horse? horse = location.characters.OfType<Horse>().FirstOrDefault(candidate => candidate.HorseId == horseId);
+                if (horse is not null)
+                    location.characters.Remove(horse);
+            }
+
+            this.ManagedHorseIds.Remove(horseId);
+            this.ManagedHorseInstances.Remove(horseId);
+        }
+
+        this.SaveData.Horses.RemoveAll(removed.Contains);
+    }
+
+    private void CleanupDeletedCabinHorses()
+    {
+        Farm? farm = Game1.getFarm();
+        if (farm is null)
+            return;
+
+        HashSet<string> cabinIds = this.GetCabinBuildings(farm)
+            .Select(cabin => cabin.id.Value.ToString())
+            .ToHashSet();
+        this.RemoveHorsesForDeletedCabins(cabinIds);
+    }
+
+    private void ApplyCabinOwnership()
+    {
+        Farm? farm = Game1.getFarm();
+        if (farm is null)
+            return;
+
+        Dictionary<string, Building> cabins = this.GetCabinBuildings(farm)
+            .ToDictionary(cabin => cabin.id.Value.ToString());
+
+        foreach (SavedHorseData savedHorse in this.SaveData.Horses)
+        {
+            if (!cabins.TryGetValue(savedHorse.CabinId, out Building? cabin))
+                continue;
+
+            this.UpdateCabinBinding(savedHorse, cabin);
+
+            if (Guid.TryParse(savedHorse.HorseId, out Guid horseId)
+                && this.ManagedHorseInstances.TryGetValue(horseId, out Horse? horse)
+                && horse.ownerId.Value != savedHorse.OwnerId)
+            {
+                horse.ownerId.Value = savedHorse.OwnerId;
+            }
+        }
+    }
+
+    private void UpdateCabinBinding(SavedHorseData savedHorse, Building cabin)
+    {
+        Cabin? indoors = cabin.GetIndoors() as Cabin;
+        savedHorse.OwnerId = indoors?.owner?.UniqueMultiplayerID ?? 0;
+    }
+
+    private Vector2 GetCabinHorseTile(Farm farm, Building cabin, int offset)
+    {
+        Point origin = new(
+            cabin.tileX.Value + Math.Max(1, cabin.tilesWide.Value / 2),
+            cabin.tileY.Value + cabin.tilesHigh.Value);
+
+        return this.FindSpawnTile(farm, origin, offset);
+    }
+
+    private void ReturnCabinHorsesHome()
+    {
+        Farm? farm = Game1.getFarm();
+        if (farm is null)
+            return;
+
+        Dictionary<string, Building> cabins = this.GetCabinBuildings(farm)
+            .ToDictionary(cabin => cabin.id.Value.ToString());
+        int offset = 0;
+
+        foreach (SavedHorseData savedHorse in this.SaveData.Horses)
+        {
+            if (!cabins.TryGetValue(savedHorse.CabinId, out Building? cabin)
+                || !Guid.TryParse(savedHorse.HorseId, out Guid horseId)
+                || !this.ManagedHorseInstances.TryGetValue(horseId, out Horse? horse))
+            {
+                continue;
+            }
+
+            foreach (GameLocation location in Game1.locations)
+            {
+                if (location != farm && location.characters.Contains(horse))
+                    location.characters.Remove(horse);
+            }
+
+            Vector2 homeTile = this.GetCabinHorseTile(farm, cabin, offset++);
+            horse.currentLocation = farm;
+            horse.setTileLocation(homeTile);
+            if (!farm.characters.Contains(horse))
+                farm.characters.Add(horse);
+
+            savedHorse.LocationName = farm.NameOrUniqueName;
+            savedHorse.TileX = (int)homeTile.X;
+            savedHorse.TileY = (int)homeTile.Y;
+        }
+    }
+
+    private void ReattachDismountedHorses()
+    {
+        List<Farmer> onlineFarmers = this.GetOnlineFarmers();
+        HashSet<long> onlineFarmerIds = onlineFarmers
+            .Select(farmer => farmer.UniqueMultiplayerID)
+            .ToHashSet();
+
+        foreach (long farmerId in this.LastMountedHorseByFarmer.Keys
+            .Where(id => !onlineFarmerIds.Contains(id))
+            .ToList())
+        {
+            this.LastMountedHorseByFarmer.Remove(farmerId);
+        }
+
+        foreach (Farmer farmer in onlineFarmers)
+        {
+            long farmerId = farmer.UniqueMultiplayerID;
+
+            if (farmer.mount is Horse mountedHorse)
+            {
+                if (this.ManagedHorseIds.Contains(mountedHorse.HorseId))
+                {
+                    this.ManagedHorseInstances[mountedHorse.HorseId] = mountedHorse;
+                    this.LastMountedHorseByFarmer[farmerId] = mountedHorse;
+                }
+
+                continue;
+            }
+
+            if (!this.LastMountedHorseByFarmer.Remove(farmerId, out Horse? dismountedHorse))
+                continue;
+
+            if (!this.ManagedHorseIds.Contains(dismountedHorse.HorseId))
+                continue;
+
+            // The vanilla game can drop a dynamically-created horse during the handoff
+            // from Farmer.mount back to GameLocation.characters. Reattach the same object
+            // after that handoff; never create a replacement horse here.
+            bool isAlreadyRegistered = Game1.locations.Any(location =>
+                location.characters.OfType<Horse>().Any(horse => horse.HorseId == dismountedHorse.HorseId));
+
+            if (isAlreadyRegistered)
+                continue;
+
+            GameLocation location = farmer.currentLocation ?? dismountedHorse.currentLocation ?? Game1.getFarm();
+            dismountedHorse.currentLocation = location;
+            dismountedHorse.Position = farmer.Position;
+            location.characters.Add(dismountedHorse);
+            this.Monitor.Log($"Reattached managed horse {dismountedHorse.HorseId} after farmer {farmerId} dismounted.", LogLevel.Trace);
+        }
+
+        HashSet<Guid> mountedHorseIds = onlineFarmers
+            .Select(farmer => farmer.mount)
+            .OfType<Horse>()
+            .Select(horse => horse.HorseId)
+            .ToHashSet();
+
+        HashSet<Guid> registeredHorseIds = Game1.locations
+            .SelectMany(location => location.characters.OfType<Horse>())
+            .Select(horse => horse.HorseId)
+            .ToHashSet();
+
+        foreach ((Guid horseId, Horse horse) in this.ManagedHorseInstances.ToList())
+        {
+            if (mountedHorseIds.Contains(horseId) || registeredHorseIds.Contains(horseId))
+                continue;
+
+            GameLocation location = horse.currentLocation ?? Game1.getFarm();
+            horse.currentLocation = location;
+            location.characters.Add(horse);
+            registeredHorseIds.Add(horseId);
+            this.Monitor.Log($"Restored managed horse instance {horseId} after it was removed from its location.", LogLevel.Trace);
+        }
     }
 
     private void NormalizeSaveData()
@@ -230,6 +452,7 @@ public sealed class ModEntry : Mod
                 savedHorse.Name = this.CreateDefaultHorseName(normalized.Count + 1);
 
             savedHorse.Skin ??= "";
+            savedHorse.CabinId ??= "";
             normalized.Add(savedHorse);
         }
 
@@ -282,6 +505,8 @@ public sealed class ModEntry : Mod
             HorseId = horse.HorseId.ToString(),
             Name = this.GetHorseName(horse, existingData),
             Skin = this.GetHorseSkin(horse, existingData),
+            CabinId = existingData?.CabinId ?? "",
+            OwnerId = existingData?.OwnerId ?? horse.ownerId.Value,
             LocationName = location.NameOrUniqueName,
             TileX = (int)tile.X,
             TileY = (int)tile.Y

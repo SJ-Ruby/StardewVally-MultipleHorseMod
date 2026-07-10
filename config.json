@@ -1,4 +1,3 @@
 {
-  "HostOnly": true,
-  "AllowExtraHorsesInSinglePlayer": false
+  "HostOnly": true
 }
