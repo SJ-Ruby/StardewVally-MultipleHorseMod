@@ -8,6 +8,7 @@
     <Compile Include="ModEntry.cs" />
     <Compile Include="ModConfig.cs" />
     <Compile Include="ModSaveData.cs" />
+    <Compile Include="HorseCustomizationMenu.cs" />
   </ItemGroup>
 
   <ItemGroup>
@@ -21,6 +22,7 @@
     <Reference Include="$(GamePath)\MonoGame.Framework.dll" />
     <Reference Include="$(GamePath)\xTile.dll" />
     <Reference Include="$(GamePath)\Stardew Valley.dll" />
+    <Reference Include="$(GamePath)\StardewValley.GameData.dll" />
     <Reference Include="$(GamePath)\StardewModdingAPI.dll" />
   </ItemGroup>
 
