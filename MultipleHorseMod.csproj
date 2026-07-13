@@ -1,39 +1,44 @@
-<Project xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+<Project Sdk="Microsoft.NET.Sdk">
   <PropertyGroup>
+    <TargetFramework>net6.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <LangVersion>latest</LangVersion>
     <AssemblyName>MultipleHorseMod</AssemblyName>
-    <GamePath>E:\SteamLibrary\steamapps\common\Stardew Valley</GamePath>
+    <RootNamespace>MultipleHorseMod</RootNamespace>
+    <PlatformTarget>x64</PlatformTarget>
   </PropertyGroup>
 
   <ItemGroup>
-    <Compile Include="ModEntry.cs" />
-    <Compile Include="ModConfig.cs" />
-    <Compile Include="ModSaveData.cs" />
-    <Compile Include="HorseCustomizationMenu.cs" />
+    <Reference Include="Stardew Valley">
+      <HintPath>E:\SteamLibrary\steamapps\common\Stardew Valley\Stardew Valley.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="StardewModdingAPI">
+      <HintPath>E:\SteamLibrary\steamapps\common\Stardew Valley\StardewModdingAPI.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="MonoGame.Framework">
+      <HintPath>E:\SteamLibrary\steamapps\common\Stardew Valley\MonoGame.Framework.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="xTile">
+      <HintPath>E:\SteamLibrary\steamapps\common\Stardew Valley\xTile.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="SMAPI.Toolkit.CoreInterfaces">
+      <HintPath>E:\SteamLibrary\steamapps\common\Stardew Valley\SMAPI.Toolkit.CoreInterfaces.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="0Harmony">
+      <HintPath>E:\SteamLibrary\steamapps\common\Stardew Valley\smapi-internal\0Harmony.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
   </ItemGroup>
 
-  <ItemGroup>
-    <Reference Include="$(GamePath)\System.Private.CoreLib.dll" />
-    <Reference Include="$(GamePath)\System.Runtime.dll" />
-    <Reference Include="$(GamePath)\System.Collections.dll" />
-    <Reference Include="$(GamePath)\System.Linq.dll" />
-    <Reference Include="$(GamePath)\System.Console.dll" />
-    <Reference Include="$(GamePath)\System.Private.Uri.dll" />
-    <Reference Include="$(GamePath)\netstandard.dll" />
-    <Reference Include="$(GamePath)\MonoGame.Framework.dll" />
-    <Reference Include="$(GamePath)\xTile.dll" />
-    <Reference Include="$(GamePath)\Stardew Valley.dll" />
-    <Reference Include="$(GamePath)\StardewValley.GameData.dll" />
-    <Reference Include="$(GamePath)\StardewModdingAPI.dll" />
-  </ItemGroup>
-
-  <Target Name="Build">
-    <Csc
-      TargetType="Library"
-      OutputAssembly="$(AssemblyName).dll"
-      Sources="@(Compile)"
-      References="@(Reference)"
-      Nullable="enable"
-      LangVersion="latest"
-      NoStandardLib="true" />
+  <Target Name="CopyManifest" AfterTargets="Build">
+    <Copy SourceFiles="manifest.json" DestinationFolder="$(OutputPath)" />
+    <Copy SourceFiles="$(TargetPath);manifest.json" DestinationFolder="$(MSBuildProjectDirectory)\release\MultipleHorseMod" />
+    <Copy SourceFiles="i18n\default.json;i18n\zh.json" DestinationFolder="$(MSBuildProjectDirectory)\release\MultipleHorseMod\i18n" />
   </Target>
 </Project>

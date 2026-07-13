@@ -1,0 +1,13 @@
+{
+  "menu.title": "马厩",
+  "menu.near-stable": "请站在马厩旁边后按 F8。",
+  "menu.buy": "购买新马",
+  "horse.default-label": "马",
+  "horse.ridden": "{{name}}（在{{rider}}旁边）",
+  "naming.title": "给新马命名",
+  "naming.default-name": "新马",
+  "purchase.invalid": "购买请求无效。",
+  "purchase.no-stable": "找不到这座马厩。",
+  "purchase.limit": "额外马匹已达到联机人数上限。",
+  "purchase.success": "{{name}} 已在马厩右侧等候。"
+}

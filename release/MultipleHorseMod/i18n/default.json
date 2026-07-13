@@ -1,0 +1,13 @@
+{
+  "menu.title": "Stable",
+  "menu.near-stable": "Stand next to a stable and press F8.",
+  "menu.buy": "Buy New Horse",
+  "horse.default-label": "Horse",
+  "horse.ridden": "{{name}} (with {{rider}})",
+  "naming.title": "Name your new horse",
+  "naming.default-name": "New Horse",
+  "purchase.invalid": "The purchase request is invalid.",
+  "purchase.no-stable": "That stable could not be found.",
+  "purchase.limit": "The extra horse limit for this multiplayer farm has been reached.",
+  "purchase.success": "{{name}} is waiting to the right of the stable."
+}
